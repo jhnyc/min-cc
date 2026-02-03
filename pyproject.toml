@@ -1,0 +1,20 @@
+[project]
+name = "min-cc"
+version = "0.1.0"
+description = "An extremely minimal but capable cli coding agent."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "openai>=2.2.0",
+    "pydantic>=2.10.6",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.4",
+    "rich>=14.3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
+[project.scripts]
+min-cc = "min_cc.cli:main"
