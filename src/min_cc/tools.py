@@ -21,16 +21,75 @@ class Tool(BaseModel):
 
 class BashTool(Tool):
     name: str = "bash"
-    description: str = "Execute a bash command in the current directory."
+    description: str = "Execute a SAFE bash command in the current directory. Avoid destructive commands (rm -rf, sudo, dd, mkfs, network fetches like curl|wget|fetch). Use for ls, cat, grep, uv, pytest, etc."
     parameters_schema: Dict[str, Any] = {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "The command to run"}
+            "command": {
+                "type": "string",
+                "description": "The SAFE command to run (no rm -rf, sudo, network)",
+            }
         },
         "required": ["command"],
     }
 
+    _DANGEROUS_PATTERNS = [
+        r"rm\s+(-rf|\*|/)",  # rm -rf, rm *, rm /
+        r"sudo\s+",
+        r"mkfs|format|fdisk",
+        r"dd\s+(if=/dev/zero|of=/dev/)",  # Overwriting devices
+        r"(curl|wget|fetch|curl\s+\||wget\s+\|)\s*https?://",  # Remote code execution
+        r";\s*(rm|sudo|mkfs|dd)",  # Chained destructives
+        r"&\s*(rm|sudo)",  # Background destructives
+        r"\$\(\s*(curl|wget)",  # Subshell fetches
+        r"`\s*(curl|wget)",  # Backtick fetches
+        r"/dev/(tcp|udp)/",  # /dev/tcp hacks
+    ]
+
     def execute(self, command: str) -> str:
+        command_lower = command.lower().strip()
+
+        # Blacklist check
+        for pattern in self._DANGEROUS_PATTERNS:
+            if re.search(pattern, command_lower):
+                return f"Safety block: Dangerous command '{command}'. Use safer alternatives."
+
+        # Whitelist: Only allow common safe dev commands (extend as needed)
+        SAFE_CMDS = {
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "grep",
+            "sed",
+            "awk",
+            "find",
+            "xargs",
+            "echo",
+            "print",
+            "pwd",
+            "cd",
+            "mkdir",
+            "touch",
+            "mv",
+            "cp",
+            "git",
+            "uv",
+            "pytest",
+            "python",
+            "pip",
+            "poetry",
+            "read",
+            "write",
+            "glob",
+            "diff",
+            "sort",
+            "uniq",
+        }
+        first_word = command.split()[0].lower() if command.split() else ""
+        if first_word not in SAFE_CMDS:
+            return f"Safety block: Unknown command '{first_word}'. Stick to safe dev tools like ls/cat/uv/pytest."
+
         try:
             result = subprocess.run(
                 command,
@@ -42,7 +101,11 @@ class BashTool(Tool):
             output = result.stdout
             if result.stderr:
                 output += f"\nErrors:\n{result.stderr}"
+            if result.returncode != 0:
+                output += f"\nExit code: {result.returncode}"
             return output or "Command executed with no output."
+        except subprocess.TimeoutExpired:
+            return f"Command timed out after {BASH_TIMEOUT}s."
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
