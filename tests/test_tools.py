@@ -8,7 +8,6 @@ from min_cc.tools import (
     ReplaceFileContentTool,
     ToolRegistry,
     WriteFileTool,
-    get_default_registry,
 )
 
 

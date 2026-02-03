@@ -4,9 +4,10 @@ from typing import Any, Callable, Dict, List, Optional
 from openai import OpenAI
 
 from .compaction import CompactionService
-from .constants import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
+from .constants import DEFAULT_BASE_URL, DEFAULT_MODEL
 from .models import AgentState, Message, ToolCall
 from .tools import ToolRegistry, get_default_registry
+from .utils import get_full_system_prompt
 
 
 class CodingAgent:
@@ -19,11 +20,12 @@ class CodingAgent:
     ):
         self.client = OpenAI(api_key=api_key, base_url=DEFAULT_BASE_URL)
         self.model = model
-        self.state = AgentState(
-            messages=[Message(role="system", content=SYSTEM_PROMPT)]
-        )
         self.registry = registry or get_default_registry()
         self.compaction_service = compaction_service or CompactionService()
+
+        self.state = AgentState(
+            messages=[Message(role="system", content=get_full_system_prompt())]
+        )
 
     def add_message(
         self,
@@ -120,3 +122,7 @@ class CodingAgent:
                 self.add_message(
                     role="tool", content=result_content, tool_call_id=tool_call.id
                 )
+
+    def clear_history(self):
+        """Reset the conversation history, keeping only the system prompt."""
+        self.state.messages = [Message(role="system", content=get_full_system_prompt())]
