@@ -185,7 +185,7 @@ class GrepTool(Tool):
             "exclude_dir_pattern": {
                 "type": "string",
                 "description": "Regex pattern for directories to exclude",
-                "default": "^\.",
+                "default": r"^\.",
             },
         },
         "required": ["pattern"],
@@ -195,7 +195,7 @@ class GrepTool(Tool):
         self,
         pattern: str,
         directory: str = ".",
-        exclude_dir_pattern: str = "^\.",
+        exclude_dir_pattern: str = r"^\.",
     ) -> str:
         try:
             regex = re.compile(pattern)

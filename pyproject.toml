@@ -3,7 +3,7 @@ name = "min-cc"
 version = "0.1.0"
 description = "An extremely minimal but capable cli coding agent."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.13"
 dependencies = [
     "openai>=2.2.0",
     "prompt-toolkit>=3.0.52",
