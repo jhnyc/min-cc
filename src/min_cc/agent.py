@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional
 from openai import OpenAI
 
 from .compaction import CompactionService
-from .constants import DEFAULT_BASE_URL, DEFAULT_MODEL
+from .constants import DEFAULT_BASE_URL, DEFAULT_MODEL, MAX_ITERATIONS
 from .models import AgentState, Message, ToolCall
 from .tools import ToolRegistry, get_default_registry
 from .utils import get_full_system_prompt
@@ -18,7 +18,9 @@ class CodingAgent:
         registry: ToolRegistry = None,
         compaction_service: CompactionService = None,
     ):
-        self.client = OpenAI(api_key=api_key, base_url=DEFAULT_BASE_URL)
+        self.client = OpenAI(
+            api_key=api_key, base_url=DEFAULT_BASE_URL, max_retries=4
+        )
         self.model = model
         self.registry = registry or get_default_registry()
         self.compaction_service = compaction_service or CompactionService()
@@ -43,45 +45,80 @@ class CodingAgent:
             )
         )
 
+    def _prepare_messages(self) -> List[Dict[str, Any]]:
+        messages = []
+        for msg in self.state.messages:
+            m = {"role": msg.role}
+            if msg.content:
+                m["content"] = msg.content
+            if msg.tool_calls:
+                m["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": tc.arguments},
+                    }
+                    for tc in msg.tool_calls
+                ]
+            if msg.tool_call_id:
+                m["tool_call_id"] = msg.tool_call_id
+            messages.append(m)
+        return messages
+
+    def _final_response(self, note: str) -> str:
+        messages = self._prepare_messages()
+        messages.append(
+            {
+                "role": "user",
+                "content": f"{note} Summarize what you accomplished and what remains. Do not call tools.",
+            }
+        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=messages
+            )
+            content = response.choices[0].message.content or note
+        except Exception as e:
+            content = f"{note} (summary request failed: {e})"
+        self.add_message("assistant", content=content)
+        return content
+
+    def _execute_tool_call(self, tool_call) -> str:
+        try:
+            args = json.loads(tool_call.function.arguments or "{}")
+            if not isinstance(args, dict):
+                raise ValueError("arguments must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            return (
+                f"Error: invalid JSON arguments for tool "
+                f"{tool_call.function.name}: {e}"
+            )
+        return self.registry.call_tool(tool_call.function.name, args)
+
     def run(
         self,
         user_input: str,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        max_iterations: int = MAX_ITERATIONS,
     ):
         self.add_message("user", user_input)
 
-        while True:
+        for _ in range(max_iterations):
             # 1. Compact if necessary
             self.state.messages = self.compaction_service.compact(
                 self.state.messages, llm_client=self.client, model=self.model
             )
 
-            # 2. Prepare messages
-            messages = []
-            for msg in self.state.messages:
-                m = {"role": msg.role}
-                if msg.content:
-                    m["content"] = msg.content
-                if msg.tool_calls:
-                    m["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.name, "arguments": tc.arguments},
-                        }
-                        for tc in msg.tool_calls
-                    ]
-                if msg.tool_call_id:
-                    m["tool_call_id"] = msg.tool_call_id
-                messages.append(m)
-
-            # 3. Call LLM
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=self.registry.get_tool_definitions(),
-                tool_choice="auto",
-            )
+            # 2. Call LLM
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=self._prepare_messages(),
+                    tools=self.registry.get_tool_definitions(),
+                    tool_choice="auto",
+                )
+            except Exception as e:
+                return f"Error: LLM request failed: {e}"
 
             assistant_msg = response.choices[0].message
 
@@ -105,7 +142,7 @@ class CodingAgent:
                 # Agent is finished with this turn
                 return assistant_msg.content
 
-            # 4. Handle tool calls
+            # 3. Handle tool calls
             for tool_call in assistant_msg.tool_calls:
                 if on_event:
                     on_event(
@@ -116,12 +153,13 @@ class CodingAgent:
                         },
                     )
 
-                args = json.loads(tool_call.function.arguments)
-                result_content = self.registry.call_tool(tool_call.function.name, args)
+                result_content = self._execute_tool_call(tool_call)
 
                 self.add_message(
                     role="tool", content=result_content, tool_call_id=tool_call.id
                 )
+
+        return self._final_response(f"Step limit reached ({max_iterations} iterations).")
 
     def clear_history(self):
         """Reset the conversation history, keeping only the system prompt."""
