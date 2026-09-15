@@ -3,10 +3,12 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List
 
 from pydantic import BaseModel
 
+from . import sandbox
 from .constants import BASH_TIMEOUT, GREP_LINE_CHAR
 
 
@@ -21,82 +23,61 @@ class Tool(BaseModel):
 
 class BashTool(Tool):
     name: str = "bash"
-    description: str = "Execute a SAFE bash command in the current directory. Avoid destructive commands (rm -rf, sudo, dd, mkfs, network fetches like curl|wget|fetch). Use for ls, cat, grep, uv, pytest, etc."
+    description: str = (
+        "Execute a bash command in the current directory. Commands run inside an "
+        "OS sandbox: filesystem writes are restricted to the working directory and "
+        "temporary directories, and network access is disabled."
+    )
     parameters_schema: Dict[str, Any] = {
         "type": "object",
         "properties": {
             "command": {
                 "type": "string",
-                "description": "The SAFE command to run (no rm -rf, sudo, network)",
+                "description": "The command to run",
             }
         },
         "required": ["command"],
     }
 
-    _DANGEROUS_PATTERNS = [
-        r"rm\s+(-rf|\*|/)",  # rm -rf, rm *, rm /
-        r"sudo\s+",
-        r"mkfs|format|fdisk",
-        r"dd\s+(if=/dev/zero|of=/dev/)",  # Overwriting devices
-        r"(curl|wget|fetch|curl\s+\||wget\s+\|)\s*https?://",  # Remote code execution
-        r";\s*(rm|sudo|mkfs|dd)",  # Chained destructives
-        r"&\s*(rm|sudo)",  # Background destructives
-        r"\$\(\s*(curl|wget)",  # Subshell fetches
-        r"`\s*(curl|wget)",  # Backtick fetches
-        r"/dev/(tcp|udp)/",  # /dev/tcp hacks
+    # Circuit breakers only; the OS sandbox is the enforcement boundary.
+    _DANGEROUS_PATTERNS: ClassVar[List[str]] = [
+        r"\brm\s+(?:-[a-z-]+\s+)*/(?:\*|\s|$)",  # rm -rf / | /*
+        r"\brm\s+(?:-[a-z-]+\s+)*(?:~|\$home)/?(?:\*|\s|$)",  # rm -rf ~ | $HOME
+        r"\bsudo\b",
+        r"\bmkfs(?:\.\w+)?(?:\s|$)",
+        r"\bdd\s+[^\n]*of=/dev/(?:disk|rdisk)",
+        r"/dev/(?:tcp|udp)/",
     ]
 
+    @classmethod
+    def _blocked_reason(cls, command: str) -> str:
+        for pattern in cls._DANGEROUS_PATTERNS:
+            if re.search(pattern, command.lower()):
+                return f"Safety block: Dangerous command '{command}'."
+        return ""
+
     def execute(self, command: str) -> str:
-        command_lower = command.lower().strip()
+        command = command.strip()
+        if not command:
+            return "Error: empty command."
 
-        # Blacklist check
-        for pattern in self._DANGEROUS_PATTERNS:
-            if re.search(pattern, command_lower):
-                return f"Safety block: Dangerous command '{command}'. Use safer alternatives."
+        reason = self._blocked_reason(command)
+        if reason:
+            return reason
 
-        # Whitelist: Only allow common safe dev commands (extend as needed)
-        SAFE_CMDS = {
-            "ls",
-            "cat",
-            "head",
-            "tail",
-            "grep",
-            "sed",
-            "awk",
-            "find",
-            "xargs",
-            "echo",
-            "print",
-            "pwd",
-            "cd",
-            "mkdir",
-            "touch",
-            "mv",
-            "cp",
-            "git",
-            "uv",
-            "pytest",
-            "python",
-            "pip",
-            "poetry",
-            "read",
-            "write",
-            "glob",
-            "diff",
-            "sort",
-            "uniq",
-        }
-        first_word = command.split()[0].lower() if command.split() else ""
-        if first_word not in SAFE_CMDS:
-            return f"Safety block: Unknown command '{first_word}'. Stick to safe dev tools like ls/cat/uv/pytest."
-
+        argv = (
+            sandbox.wrap_command(command, Path.cwd().resolve())
+            if sandbox.is_enabled()
+            else None
+        )
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                argv or command,
+                shell=argv is None,
                 capture_output=True,
                 text=True,
                 timeout=BASH_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
             output = result.stdout
             if result.stderr:
@@ -302,9 +283,15 @@ class ToolRegistry:
         ]
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
-        if name not in self._tools:
+        tool = self._tools.get(name)
+        if tool is None:
             return f"Error: Tool {name} not found."
-        return self._tools[name].execute(**arguments)
+        try:
+            return tool.execute(**arguments)
+        except TypeError as e:
+            return f"Error: invalid arguments for tool {name}: {e}"
+        except Exception as e:
+            return f"Error: tool {name} failed: {e}"
 
 
 def get_default_registry() -> ToolRegistry:
