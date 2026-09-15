@@ -16,8 +16,13 @@ from min_cc.cli.commands.base import CommandContext
 from min_cc.cli.completer import SlashCommandCompleter
 from min_cc.cli.style import CLI_STYLE, RICH_THEME
 from min_cc.compaction import CompactionService, CompactionStrategy
-from min_cc.constants import MODEL, TOKEN_LIMIT_FALLBACK, TOKEN_LIMIT_PERCENTAGE
-from min_cc.utils import format_number, get_model_context_length, trim_tool_call_args
+from min_cc.constants import TOKEN_LIMIT_FALLBACK, TOKEN_LIMIT_PERCENTAGE
+from min_cc.utils import (
+    format_number,
+    get_model,
+    get_model_context_length,
+    trim_tool_call_args,
+)
 
 console = Console(theme=RICH_THEME)
 # Rebuild CommandContext now that CodingAgent and Console are available in the namespace
@@ -40,7 +45,8 @@ def setup_agent():
         else CompactionStrategy.TRUNCATE
     )
 
-    context_window = get_model_context_length(MODEL)
+    model = get_model()
+    context_window = get_model_context_length(model)
     token_limit = (
         int(context_window * TOKEN_LIMIT_PERCENTAGE)
         if isinstance(context_window, int) and context_window > 0
@@ -48,9 +54,9 @@ def setup_agent():
     )
 
     service = CompactionService(token_limit=token_limit, strategy=strategy)
-    agent = CodingAgent(api_key=api_key, model=MODEL, compaction_service=service)
+    agent = CodingAgent(api_key=api_key, model=model, compaction_service=service)
 
-    return agent, context_window, token_limit, strategy_name
+    return agent, model, context_window, token_limit, strategy_name
 
 
 def handle_event(event_type: str, data: Dict[str, Any]):
@@ -62,10 +68,12 @@ def handle_event(event_type: str, data: Dict[str, Any]):
             console.print(f"   [dim]Args: {json.dumps(trimmed_args)}[/dim]")
         except Exception:
             console.print(f"   [dim]Args: {data['arguments']}[/dim]")
+    elif event_type == "notice":
+        console.print(f"[warning]{data['message']}[/warning]")
 
 
 def main():
-    agent, context_window, token_limit, strategy_name = setup_agent()
+    agent, model, context_window, token_limit, strategy_name = setup_agent()
     load_commands()
 
     ctx_str = (
@@ -74,7 +82,7 @@ def main():
     limit_str = format_number(token_limit)
     banner_text = (
         f"[banner]Min-CC: Mini Claude Code[/banner]\n"
-        f"[dim]Model: {MODEL} ({ctx_str} ctx)[/dim]\n"
+        f"[dim]Model: {model} ({ctx_str} ctx)[/dim]\n"
         f"[dim]Compaction: {strategy_name} @ {limit_str}[/dim]"
     )
 

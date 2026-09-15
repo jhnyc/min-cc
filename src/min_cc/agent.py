@@ -4,7 +4,12 @@ from typing import Any, Callable, Dict, List, Optional
 from openai import OpenAI
 
 from .compaction import CompactionService
-from .constants import DEFAULT_BASE_URL, DEFAULT_MODEL, MAX_ITERATIONS
+from .constants import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    FALLBACK_MODELS,
+    MAX_ITERATIONS,
+)
 from .models import AgentState, Message, ToolCall
 from .tools import ToolRegistry, get_default_registry
 from .utils import get_full_system_prompt
@@ -17,6 +22,7 @@ class CodingAgent:
         model: str = DEFAULT_MODEL,
         registry: ToolRegistry = None,
         compaction_service: CompactionService = None,
+        fallback_models: List[str] = None,
     ):
         self.client = OpenAI(
             api_key=api_key, base_url=DEFAULT_BASE_URL, max_retries=4
@@ -24,6 +30,10 @@ class CodingAgent:
         self.model = model
         self.registry = registry or get_default_registry()
         self.compaction_service = compaction_service or CompactionService()
+
+        candidates = FALLBACK_MODELS if fallback_models is None else fallback_models
+        self._fallbacks = [m for m in candidates if m != model]
+        self._on_event = None
 
         self.state = AgentState(
             messages=[Message(role="system", content=get_full_system_prompt())]
@@ -45,12 +55,45 @@ class CodingAgent:
             )
         )
 
+    def _notify(self, message: str):
+        if self._on_event:
+            self._on_event("notice", {"message": message})
+
+    def _switch_model(self, reason: str):
+        self.model = self._fallbacks.pop(0)
+        self._notify(f"Model unavailable ({reason}); falling back to {self.model}")
+
+    def _chat(self, **kwargs):
+        """Call the LLM, falling back on deprecation or upstream provider errors."""
+        while True:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model, **kwargs
+                )
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                if (status == 404 or (status is not None and status >= 500)) and self._fallbacks:
+                    self._switch_model(str(e))
+                    continue
+                raise
+
+            error = getattr(response, "error", None)
+            if getattr(response, "choices", None):
+                return response
+            if self._fallbacks:
+                reason = error.get("message") if isinstance(error, dict) else error
+                self._switch_model(reason or "empty response")
+                continue
+            raise RuntimeError(f"LLM provider error: {error or 'empty response'}")
+
     def _prepare_messages(self) -> List[Dict[str, Any]]:
         messages = []
         for msg in self.state.messages:
             m = {"role": msg.role}
             if msg.content:
                 m["content"] = msg.content
+            elif msg.tool_calls:
+                m["content"] = ""
             if msg.tool_calls:
                 m["tool_calls"] = [
                     {
@@ -74,9 +117,7 @@ class CodingAgent:
             }
         )
         try:
-            response = self.client.chat.completions.create(
-                model=self.model, messages=messages
-            )
+            response = self._chat(messages=messages)
             content = response.choices[0].message.content or note
         except Exception as e:
             content = f"{note} (summary request failed: {e})"
@@ -102,6 +143,7 @@ class CodingAgent:
         max_iterations: int = MAX_ITERATIONS,
     ):
         self.add_message("user", user_input)
+        self._on_event = on_event
 
         for _ in range(max_iterations):
             # 1. Compact if necessary
@@ -111,8 +153,7 @@ class CodingAgent:
 
             # 2. Call LLM
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
+                response = self._chat(
                     messages=self._prepare_messages(),
                     tools=self.registry.get_tool_definitions(),
                     tool_choice="auto",

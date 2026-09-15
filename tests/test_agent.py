@@ -102,3 +102,31 @@ def test_llm_error_returns_message_instead_of_raising():
 
     assert "Error: LLM request failed" in result
     assert "connection reset" in result
+
+
+def test_deprecated_model_falls_back():
+    error = RuntimeError("model deprecated")
+    error.status_code = 404
+    fake = FakeClient([error, assistant_text("ok")])
+    agent = make_agent(fake)
+    notices = []
+    result = agent.run("hello", on_event=lambda t, d: notices.append((t, d)))
+
+    assert result == "ok"
+    assert agent.model == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert notices[0][0] == "notice"
+    assert fake.calls[1]["model"] == agent.model
+
+
+def test_provider_error_falls_back():
+    overloaded = SimpleNamespace(
+        choices=None, error={"message": "Service temporarily overloaded", "code": 502}
+    )
+    fake = FakeClient([overloaded, assistant_text("ok")])
+    agent = make_agent(fake)
+    notices = []
+    result = agent.run("hello", on_event=lambda t, d: notices.append((t, d)))
+
+    assert result == "ok"
+    assert agent.model == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert "notice" == notices[0][0]

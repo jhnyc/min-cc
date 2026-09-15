@@ -3,7 +3,12 @@ from typing import Any, Dict, Union
 
 import requests
 
-from .constants import SYSTEM_PROMPT, TRIM_TOOL_CALL_ARGS
+from .constants import DEFAULT_MODEL, SYSTEM_PROMPT, TRIM_TOOL_CALL_ARGS
+
+
+def get_model() -> str:
+    """Model selected at startup, overridable via MIN_CC_MODEL."""
+    return os.getenv("MIN_CC_MODEL") or DEFAULT_MODEL
 
 
 def get_model_context_length(model_id: str) -> Union[int, str]:
